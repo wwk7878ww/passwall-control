@@ -27,6 +27,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -49,6 +50,7 @@ public class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private WebView webView;
+    private ScrollView scrollView;
     private EditText addressInput;
     private EditText usernameInput;
     private EditText passwordInput;
@@ -58,11 +60,13 @@ public class MainActivity extends Activity {
     private LinearLayout settingsPanel;
     private Button actionButton;
     private Button settingsButton;
+    private Button openPageButton;
     private SharedPreferences prefs;
 
     private int workMode = MODE_IDLE;
     private int pageScriptRetryCount = 0;
     private Boolean aclEnabled = null;
+    private boolean debugPageVisible = false;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -87,14 +91,23 @@ public class MainActivity extends Activity {
                 dp(3)
         ));
 
+        scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.setClipToPadding(false);
+        scrollView.setPadding(0, 0, 0, dp(18));
+        root.addView(scrollView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1
+        ));
+
         LinearLayout mainArea = new LinearLayout(this);
         mainArea.setOrientation(LinearLayout.VERTICAL);
         mainArea.setGravity(Gravity.CENTER_HORIZONTAL);
         mainArea.setPadding(dp(22), dp(22), dp(22), dp(12));
-        root.addView(mainArea, new LinearLayout.LayoutParams(
+        scrollView.addView(mainArea, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1
+                ViewGroup.LayoutParams.MATCH_PARENT
         ));
 
         TextView title = new TextView(this);
@@ -224,7 +237,7 @@ public class MainActivity extends Activity {
         settingButtonsRow2.setOrientation(LinearLayout.HORIZONTAL);
         settingButtonsRow2.setGravity(Gravity.CENTER_VERTICAL);
 
-        Button openPageButton = makeSmallButton("打开网页");
+        openPageButton = makeSmallButton("打开网页");
         Button clearCookieButton = makeSmallButton("清除登录");
         settingButtonsRow2.addView(openPageButton, new LinearLayout.LayoutParams(0, dp(46), 1));
         settingButtonsRow2.addView(clearCookieButton, new LinearLayout.LayoutParams(0, dp(46), 1));
@@ -285,6 +298,12 @@ public class MainActivity extends Activity {
         input.setTextSize(14);
         input.setHint(hint);
         input.setSelectAllOnFocus(false);
+        input.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus && scrollView != null) {
+                handler.postDelayed(() -> scrollView.smoothScrollTo(0, settingsPanel.getBottom()), 300);
+                handler.postDelayed(() -> scrollView.smoothScrollTo(0, settingsPanel.getBottom()), 700);
+            }
+        });
         if (password) {
             input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         } else {
@@ -316,7 +335,7 @@ public class MainActivity extends Activity {
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.3");
+        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.4");
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -366,19 +385,42 @@ public class MainActivity extends Activity {
 
     private void toggleSettingsPanel() {
         settingsPanel.setVisibility(settingsPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+        if (settingsPanel.getVisibility() == View.VISIBLE && scrollView != null) {
+            handler.postDelayed(() -> scrollView.smoothScrollTo(0, settingsPanel.getBottom()), 200);
+        }
     }
 
     private void openDebugWebPage() {
         saveSettings();
+        if (debugPageVisible) {
+            closeDebugWebPage();
+            return;
+        }
         workMode = MODE_IDLE;
         pageScriptRetryCount = 0;
+        debugPageVisible = true;
         actionButton.setEnabled(true);
         settingsButton.setEnabled(true);
+        openPageButton.setText("关闭网页");
         statusText.setText("已打开网页模式");
-        detailText.setText("可直接查看当前 WebView 到了哪个 LuCI 页面，便于确认登录或页面跳转情况。");
+        detailText.setText("可直接查看当前 WebView 到了哪个 LuCI 页面。再次点击“关闭网页”可收起页面。");
         webView.getLayoutParams().height = dp(360);
         webView.requestLayout();
         webView.loadUrl(addCacheBuster(normalizeToAclUrl(addressInput.getText().toString().trim())));
+    }
+
+    private void closeDebugWebPage() {
+        debugPageVisible = false;
+        if (openPageButton != null) {
+            openPageButton.setText("打开网页");
+        }
+        if (webView != null) {
+            webView.stopLoading();
+            webView.getLayoutParams().height = dp(1);
+            webView.requestLayout();
+        }
+        statusText.setText("已关闭网页模式");
+        detailText.setText("页面已收起。需要排错时可在设置中再次点击“打开网页”。");
     }
 
     private void startOneClickToggle() {
@@ -407,6 +449,10 @@ public class MainActivity extends Activity {
     private void beginWork(int mode, String status, String detail) {
         workMode = mode;
         pageScriptRetryCount = 0;
+        debugPageVisible = false;
+        if (openPageButton != null) {
+            openPageButton.setText("打开网页");
+        }
         actionButton.setEnabled(false);
         settingsButton.setEnabled(false);
         statusText.setText(status);
@@ -430,6 +476,9 @@ public class MainActivity extends Activity {
             statusText.setText("等待设置");
             detailText.setText("填写并保存后，App 会先验证登录状态，再执行一键切换。");
             updateActionButtonUnknown("一键切换");
+            if (scrollView != null) {
+                handler.postDelayed(() -> scrollView.smoothScrollTo(0, settingsPanel.getBottom()), 200);
+            }
             return false;
         }
         return true;
@@ -773,7 +822,9 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.getLayoutParams().height > dp(10) && webView.canGoBack()) {
+        if (debugPageVisible) {
+            closeDebugWebPage();
+        } else if (webView != null && webView.getLayoutParams().height > dp(10) && webView.canGoBack()) {
             webView.goBack();
         } else {
             super.onBackPressed();
