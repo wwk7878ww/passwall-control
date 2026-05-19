@@ -9,6 +9,9 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -26,16 +29,33 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
 public class MainActivity extends Activity {
     private static final String PREFS = "passwall_control_prefs";
     private static final String KEY_ADDRESS = "router_address";
+    private static final String KEY_USERNAME = "router_username";
+    private static final String KEY_PASSWORD = "router_password";
     private static final String DEFAULT_ADDRESS = "10.1.1.1";
+    private static final String DEFAULT_USERNAME = "root";
     private static final String ACL_PATH = "/cgi-bin/luci/admin/services/passwall/acl";
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
 
     private WebView webView;
     private EditText addressInput;
+    private EditText usernameInput;
+    private EditText passwordInput;
+    private TextView statusText;
+    private TextView detailText;
     private ProgressBar progressBar;
+    private LinearLayout settingsPanel;
+    private Button actionButton;
+    private Button settingsButton;
     private SharedPreferences prefs;
+
+    private boolean automationRunning = false;
+    private int automationStep = 0;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -45,92 +65,221 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
+        root.setBackgroundColor(Color.rgb(247, 249, 253));
         root.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
         ));
 
-        LinearLayout toolbar = new LinearLayout(this);
-        toolbar.setOrientation(LinearLayout.VERTICAL);
-        toolbar.setPadding(dp(10), dp(8), dp(10), dp(6));
-        toolbar.setBackgroundColor(Color.rgb(246, 248, 252));
-
-        TextView title = new TextView(this);
-        title.setText("PassWall 访问控制");
-        title.setTextSize(18);
-        title.setTextColor(Color.rgb(30, 45, 70));
-        title.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.addView(title, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(30)
-        ));
-
-        LinearLayout addressRow = new LinearLayout(this);
-        addressRow.setOrientation(LinearLayout.HORIZONTAL);
-        addressRow.setGravity(Gravity.CENTER_VERTICAL);
-
-        addressInput = new EditText(this);
-        addressInput.setSingleLine(true);
-        addressInput.setTextSize(14);
-        addressInput.setHint("10.1.1.1 或 http://10.1.1.1:端口");
-        addressInput.setText(prefs.getString(KEY_ADDRESS, DEFAULT_ADDRESS));
-        addressInput.setSelectAllOnFocus(false);
-        addressRow.addView(addressInput, new LinearLayout.LayoutParams(
-                0,
-                dp(44),
-                1
-        ));
-
-        Button openButton = makeButton("打开");
-        Button refreshButton = makeButton("刷新");
-        Button backButton = makeButton("返回");
-        addressRow.addView(openButton);
-        addressRow.addView(refreshButton);
-        addressRow.addView(backButton);
-        toolbar.addView(addressRow);
-
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgress(0);
-        root.addView(toolbar);
+        progressBar.setVisibility(View.GONE);
         root.addView(progressBar, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(3)
         ));
 
-        webView = new WebView(this);
-        root.addView(webView, new LinearLayout.LayoutParams(
+        LinearLayout mainArea = new LinearLayout(this);
+        mainArea.setOrientation(LinearLayout.VERTICAL);
+        mainArea.setGravity(Gravity.CENTER_HORIZONTAL);
+        mainArea.setPadding(dp(22), dp(22), dp(22), dp(12));
+        root.addView(mainArea, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1
         ));
-        setContentView(root);
 
+        TextView title = new TextView(this);
+        title.setText("passwall控制");
+        title.setTextSize(24);
+        title.setTextColor(Color.rgb(27, 43, 68));
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, dp(12), 0, dp(8));
+        mainArea.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("一键切换访问控制主开关，并保存应用");
+        subtitle.setTextSize(14);
+        subtitle.setTextColor(Color.rgb(104, 116, 135));
+        subtitle.setGravity(Gravity.CENTER);
+        subtitle.setPadding(0, 0, 0, dp(20));
+        mainArea.addView(subtitle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        View topSpacer = new View(this);
+        mainArea.addView(topSpacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1
+        ));
+
+        actionButton = new Button(this);
+        actionButton.setText("一键切换");
+        actionButton.setTextSize(24);
+        actionButton.setAllCaps(false);
+        actionButton.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(118)
+        );
+        actionLp.setMargins(0, 0, 0, dp(18));
+        mainArea.addView(actionButton, actionLp);
+
+        statusText = new TextView(this);
+        statusText.setText("未执行");
+        statusText.setTextSize(16);
+        statusText.setTextColor(Color.rgb(40, 55, 80));
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setPadding(0, 0, 0, dp(6));
+        mainArea.addView(statusText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        detailText = new TextView(this);
+        detailText.setText("首次使用请先在下方设置软路由地址、用户名和密码。");
+        detailText.setTextSize(13);
+        detailText.setTextColor(Color.rgb(110, 120, 135));
+        detailText.setGravity(Gravity.CENTER);
+        detailText.setPadding(0, 0, 0, dp(12));
+        mainArea.addView(detailText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        View bottomSpacer = new View(this);
+        mainArea.addView(bottomSpacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1
+        ));
+
+        settingsButton = new Button(this);
+        settingsButton.setText("设置");
+        settingsButton.setAllCaps(false);
+        settingsButton.setTextSize(15);
+        LinearLayout.LayoutParams settingsBtnLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+        );
+        settingsBtnLp.setMargins(0, 0, 0, dp(8));
+        mainArea.addView(settingsButton, settingsBtnLp);
+
+        settingsPanel = new LinearLayout(this);
+        settingsPanel.setOrientation(LinearLayout.VERTICAL);
+        settingsPanel.setPadding(dp(12), dp(12), dp(12), dp(12));
+        settingsPanel.setBackgroundColor(Color.WHITE);
+        mainArea.addView(settingsPanel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        addressInput = makeInput("软路由地址，例如 10.1.1.1 或 http://10.1.1.1:10086", false);
+        addressInput.setText(prefs.getString(KEY_ADDRESS, DEFAULT_ADDRESS));
+        usernameInput = makeInput("LuCI 用户名，例如 root", false);
+        usernameInput.setText(prefs.getString(KEY_USERNAME, DEFAULT_USERNAME));
+        passwordInput = makeInput("LuCI 密码，仅保存在本机", true);
+        passwordInput.setText(prefs.getString(KEY_PASSWORD, ""));
+
+        settingsPanel.addView(makeLabel("软路由地址"));
+        settingsPanel.addView(addressInput, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+        ));
+        settingsPanel.addView(makeLabel("用户名"));
+        settingsPanel.addView(usernameInput, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+        ));
+        settingsPanel.addView(makeLabel("密码"));
+        settingsPanel.addView(passwordInput, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+        ));
+
+        LinearLayout settingButtons = new LinearLayout(this);
+        settingButtons.setOrientation(LinearLayout.HORIZONTAL);
+        settingButtons.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button saveButton = makeSmallButton("保存设置");
+        Button openPageButton = makeSmallButton("打开网页");
+        Button clearCookieButton = makeSmallButton("清除登录");
+        settingButtons.addView(saveButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingButtons.addView(openPageButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingButtons.addView(clearCookieButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingsPanel.addView(settingButtons);
+
+        webView = new WebView(this);
+        root.addView(webView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(1)
+        ));
+
+        setContentView(root);
         configureWebView();
 
-        openButton.setOnClickListener(v -> loadAclPage());
-        refreshButton.setOnClickListener(v -> webView.reload());
-        backButton.setOnClickListener(v -> {
-            if (webView.canGoBack()) {
-                webView.goBack();
-            } else {
-                Toast.makeText(this, "已经是当前页面", Toast.LENGTH_SHORT).show();
-            }
+        actionButton.setOnClickListener(v -> startOneClickToggle());
+        settingsButton.setOnClickListener(v -> toggleSettingsPanel());
+        saveButton.setOnClickListener(v -> {
+            saveSettings();
+            Toast.makeText(this, "设置已保存", Toast.LENGTH_SHORT).show();
+        });
+        openPageButton.setOnClickListener(v -> {
+            saveSettings();
+            automationRunning = false;
+            automationStep = 0;
+            statusText.setText("已打开网页模式");
+            detailText.setText("当前为网页管理模式，可手动登录和操作。");
+            webView.getLayoutParams().height = dp(320);
+            webView.requestLayout();
+            webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim()));
+        });
+        clearCookieButton.setOnClickListener(v -> {
+            CookieManager.getInstance().removeAllCookies(null);
+            CookieManager.getInstance().flush();
+            statusText.setText("已清除登录状态");
+            detailText.setText("下次执行时会重新自动登录。");
         });
 
-        loadAclPage();
+        boolean hasPassword = prefs.getString(KEY_PASSWORD, "").length() > 0;
+        settingsPanel.setVisibility(hasPassword ? View.GONE : View.VISIBLE);
     }
 
-    private Button makeButton(String text) {
+    private TextView makeLabel(String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextSize(13);
+        label.setTextColor(Color.rgb(80, 92, 110));
+        label.setPadding(0, dp(8), 0, dp(2));
+        return label;
+    }
+
+    private EditText makeInput(String hint, boolean password) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextSize(14);
+        input.setHint(hint);
+        input.setSelectAllOnFocus(false);
+        if (password) {
+            input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        } else {
+            input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        }
+        return input;
+    }
+
+    private Button makeSmallButton(String text) {
         Button b = new Button(this);
         b.setText(text);
         b.setAllCaps(false);
-        b.setTextSize(14);
-        b.setPadding(dp(8), 0, dp(8), 0);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(44));
-        lp.setMargins(dp(6), 0, 0, 0);
-        b.setLayoutParams(lp);
+        b.setTextSize(13);
+        b.setPadding(dp(4), 0, dp(4), 0);
         return b;
     }
 
@@ -142,13 +291,13 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
-        settings.setBuiltInZoomControls(true);
+        settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
-        settings.setSupportZoom(true);
+        settings.setSupportZoom(false);
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.0");
+        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.1");
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -179,35 +328,208 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 CookieManager.getInstance().flush();
                 injectCompactMode();
+                if (automationRunning && automationStep == 0) {
+                    handler.postDelayed(() -> runAutomationScript(url), 900);
+                }
             }
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (request.isForMainFrame()) {
-                    Toast.makeText(MainActivity.this, "页面打开失败，请检查地址或网络", Toast.LENGTH_LONG).show();
+                    failAutomation("页面打开失败，请检查软路由地址或手机网络。");
                 }
             }
         });
     }
 
-    private void loadAclPage() {
-        String raw = addressInput.getText().toString().trim();
-        if (raw.length() == 0) {
-            raw = DEFAULT_ADDRESS;
-        }
-        prefs.edit().putString(KEY_ADDRESS, raw).apply();
+    private void toggleSettingsPanel() {
+        settingsPanel.setVisibility(settingsPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+    }
 
+    private void startOneClickToggle() {
+        saveSettings();
+
+        String address = addressInput.getText().toString().trim();
+        String username = usernameInput.getText().toString().trim();
+        String password = passwordInput.getText().toString();
+
+        if (address.length() == 0) {
+            addressInput.setText(DEFAULT_ADDRESS);
+            address = DEFAULT_ADDRESS;
+        }
+        if (username.length() == 0 || password.length() == 0) {
+            settingsPanel.setVisibility(View.VISIBLE);
+            Toast.makeText(this, "请先填写 LuCI 用户名和密码", Toast.LENGTH_SHORT).show();
+            return;
+        }
         if (!isNetworkAvailable()) {
             Toast.makeText(this, "当前手机网络不可用", Toast.LENGTH_SHORT).show();
         }
 
-        String url = normalizeToAclUrl(raw);
-        webView.loadUrl(url);
+        automationRunning = true;
+        automationStep = 0;
+        actionButton.setEnabled(false);
+        settingsButton.setEnabled(false);
+        statusText.setText("正在连接软路由...");
+        detailText.setText("会自动登录 LuCI，然后切换访问控制主开关并保存应用。");
+        webView.getLayoutParams().height = dp(1);
+        webView.requestLayout();
+
+        webView.loadUrl(normalizeToAclUrl(address));
+    }
+
+    private void saveSettings() {
+        prefs.edit()
+                .putString(KEY_ADDRESS, addressInput.getText().toString().trim())
+                .putString(KEY_USERNAME, usernameInput.getText().toString().trim())
+                .putString(KEY_PASSWORD, passwordInput.getText().toString())
+                .apply();
+    }
+
+    private void runAutomationScript(String currentUrl) {
+        if (!automationRunning || automationStep != 0) {
+            return;
+        }
+
+        String username = usernameInput.getText().toString().trim();
+        String password = passwordInput.getText().toString();
+
+        String js = "(function(){" +
+                "try{" +
+                "var USER=" + JSONObject.quote(username) + ";" +
+                "var PASS=" + JSONObject.quote(password) + ";" +
+                "function fire(el,type){try{el.dispatchEvent(new Event(type,{bubbles:true,cancelable:true}));}catch(e){}}" +
+                "function text(el){return ((el.innerText||el.textContent||el.value||'')+'').trim();}" +
+                "function findLoginUser(){" +
+                "return document.querySelector('input[name=\"luci_username\"],input#luci_username,input[name=\"username\"],input[type=\"text\"],input:not([type])');" +
+                "}" +
+                "function findLoginPass(){" +
+                "return document.querySelector('input[name=\"luci_password\"],input#luci_password,input[name=\"password\"],input[type=\"password\"]');" +
+                "}" +
+                "var passEl=findLoginPass();" +
+                "var userEl=findLoginUser();" +
+                "if(passEl && userEl){" +
+                "userEl.focus();userEl.value=USER;fire(userEl,'input');fire(userEl,'change');" +
+                "passEl.focus();passEl.value=PASS;fire(passEl,'input');fire(passEl,'change');" +
+                "var form=passEl.form||userEl.form;" +
+                "var btn=null;" +
+                "if(form){btn=form.querySelector('button[type=\"submit\"],input[type=\"submit\"],button,input.cbi-button');}" +
+                "if(!btn){btn=Array.from(document.querySelectorAll('button,input[type=\"submit\"]')).find(function(e){var t=text(e);return /登录|登陆|Login|Sign in/i.test(t);});}" +
+                "if(btn){btn.click();}else if(form){form.submit();}else{return 'LOGIN_FORM_NO_SUBMIT';}" +
+                "return 'LOGIN_SUBMITTED';" +
+                "}" +
+                "if(location.href.indexOf('/cgi-bin/luci/admin/services/passwall/acl')<0){" +
+                "return 'NOT_ACL:'+location.href;" +
+                "}" +
+                "var candidates=Array.from(document.querySelectorAll('input[type=\"checkbox\"]'));" +
+                "var main=candidates.find(function(cb){" +
+                "var id=(cb.id||'');var name=(cb.name||'');var box=cb.closest('.cbi-value,.cbi-section-node,div');var body=text(box||cb);" +
+                "return name.indexOf('acl_enable')>=0 || id.indexOf('acl_enable')>=0 || body.indexOf('主开关')>=0;" +
+                "});" +
+                "if(!main){return 'ACL_SWITCH_NOT_FOUND';}" +
+                "var before=main.checked?'开启':'关闭';" +
+                "try{main.scrollIntoView({block:'center'});}catch(e){}" +
+                "var label=main.id?document.querySelector('label[for=\"'+main.id+'\"]'):null;" +
+                "if(label){label.click();}else{main.click();}" +
+                "if((before==='开启' && main.checked) || (before==='关闭' && !main.checked)){" +
+                "main.checked=!main.checked;" +
+                "}" +
+                "fire(main,'input');fire(main,'change');fire(main,'click');" +
+                "var after=main.checked?'开启':'关闭';" +
+                "setTimeout(function(){" +
+                "var apply=document.querySelector('.cbi-button-apply,input[name=\"cbi.apply\"],button[name=\"cbi.apply\"],input[value*=\"保存并应用\"],button[value*=\"保存并应用\"]');" +
+                "if(!apply){" +
+                "apply=Array.from(document.querySelectorAll('button,input[type=\"submit\"],input[type=\"button\"],a')).find(function(e){" +
+                "var t=text(e);return t.indexOf('保存并应用')>=0 || /Save\\s*&\\s*Apply/i.test(t) || /Save.*Apply/i.test(t);" +
+                "});" +
+                "}" +
+                "if(apply){apply.click();}" +
+                "},350);" +
+                "return 'TOGGLED:'+before+'->'+after;" +
+                "}catch(e){return 'ERROR:'+e.message;}" +
+                "})()";
+
+        webView.evaluateJavascript(js, result -> handleAutomationResult(result == null ? "" : result));
+    }
+
+    private void handleAutomationResult(String rawResult) {
+        if (!automationRunning) {
+            return;
+        }
+
+        String result = rawResult;
+        if (result.startsWith("\"") && result.endsWith("\"") && result.length() >= 2) {
+            result = result.substring(1, result.length() - 1)
+                    .replace("\\\"", "\"")
+                    .replace("\\n", "\n")
+                    .replace("\\u003C", "<")
+                    .replace("\\u003E", ">")
+                    .replace("\\u0026", "&");
+        }
+
+        if (result.startsWith("LOGIN_SUBMITTED")) {
+            statusText.setText("正在自动登录...");
+            detailText.setText("登录成功后会继续切换主开关。");
+            return;
+        }
+
+        if (result.startsWith("NOT_ACL:")) {
+            statusText.setText("登录后重新进入访问控制页...");
+            handler.postDelayed(() -> webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim())), 700);
+            return;
+        }
+
+        if (result.startsWith("TOGGLED:")) {
+            automationStep = 1;
+            statusText.setText("已点击保存并应用");
+            detailText.setText(result.replace("TOGGLED:", "主开关状态：") + "，正在等待配置生效。");
+            handler.postDelayed(() -> finishAutomation("执行完成"), 6500);
+            return;
+        }
+
+        if (result.startsWith("LOGIN_FORM_NO_SUBMIT")) {
+            failAutomation("已填写登录信息，但没有找到登录按钮。请点“打开网页”确认登录页结构。");
+            return;
+        }
+
+        if (result.startsWith("ACL_SWITCH_NOT_FOUND")) {
+            failAutomation("没有找到访问控制主开关。请点“打开网页”确认是否已进入 PassWall 访问控制页面。");
+            return;
+        }
+
+        if (result.startsWith("ERROR:")) {
+            failAutomation("自动操作失败：" + result);
+            return;
+        }
+
+        failAutomation("自动操作失败，返回结果：" + result);
+    }
+
+    private void finishAutomation(String message) {
+        automationRunning = false;
+        automationStep = 0;
+        actionButton.setEnabled(true);
+        settingsButton.setEnabled(true);
+        statusText.setText(message);
+        CookieManager.getInstance().flush();
+    }
+
+    private void failAutomation(String message) {
+        automationRunning = false;
+        automationStep = 0;
+        actionButton.setEnabled(true);
+        settingsButton.setEnabled(true);
+        statusText.setText("执行失败");
+        detailText.setText(message);
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private String normalizeToAclUrl(String raw) {
-        String value = raw.trim();
+        String value = raw == null ? "" : raw.trim();
+        if (value.length() == 0) {
+            value = DEFAULT_ADDRESS;
+        }
         if (!value.startsWith("http://") && !value.startsWith("https://")) {
             value = "http://" + value;
         }
@@ -220,7 +542,7 @@ public class MainActivity extends Activity {
         }
 
         String path = uri.getPath();
-        if (path != null && path.contains("/cgi-bin/luci/admin/services/passwall/acl")) {
+        if (path != null && path.contains(ACL_PATH)) {
             return value;
         }
 
@@ -269,7 +591,7 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
+        if (webView != null && webView.getLayoutParams().height > dp(10) && webView.canGoBack()) {
             webView.goBack();
         } else {
             super.onBackPressed();
