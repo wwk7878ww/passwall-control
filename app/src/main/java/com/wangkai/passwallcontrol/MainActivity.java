@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
@@ -40,6 +41,10 @@ public class MainActivity extends Activity {
     private static final String DEFAULT_USERNAME = "root";
     private static final String ACL_PATH = "/cgi-bin/luci/admin/services/passwall/acl";
 
+    private static final int MODE_IDLE = 0;
+    private static final int MODE_CHECK_STATE = 1;
+    private static final int MODE_TOGGLE = 2;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private WebView webView;
@@ -54,8 +59,8 @@ public class MainActivity extends Activity {
     private Button settingsButton;
     private SharedPreferences prefs;
 
-    private boolean automationRunning = false;
-    private int automationStep = 0;
+    private int workMode = MODE_IDLE;
+    private Boolean aclEnabled = null;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -120,8 +125,7 @@ public class MainActivity extends Activity {
         ));
 
         actionButton = new Button(this);
-        actionButton.setText("一键切换");
-        actionButton.setTextSize(24);
+        actionButton.setTextSize(22);
         actionButton.setAllCaps(false);
         actionButton.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(
@@ -130,9 +134,10 @@ public class MainActivity extends Activity {
         );
         actionLp.setMargins(0, 0, 0, dp(18));
         mainArea.addView(actionButton, actionLp);
+        updateActionButtonUnknown("检测状态中");
 
         statusText = new TextView(this);
-        statusText.setText("未执行");
+        statusText.setText("正在初始化");
         statusText.setTextSize(16);
         statusText.setTextColor(Color.rgb(40, 55, 80));
         statusText.setGravity(Gravity.CENTER);
@@ -208,10 +213,10 @@ public class MainActivity extends Activity {
         settingButtons.setGravity(Gravity.CENTER_VERTICAL);
 
         Button saveButton = makeSmallButton("保存设置");
-        Button openPageButton = makeSmallButton("打开网页");
+        Button refreshStateButton = makeSmallButton("刷新状态");
         Button clearCookieButton = makeSmallButton("清除登录");
         settingButtons.addView(saveButton, new LinearLayout.LayoutParams(0, dp(46), 1));
-        settingButtons.addView(openPageButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingButtons.addView(refreshStateButton, new LinearLayout.LayoutParams(0, dp(46), 1));
         settingButtons.addView(clearCookieButton, new LinearLayout.LayoutParams(0, dp(46), 1));
         settingsPanel.addView(settingButtons);
 
@@ -229,26 +234,29 @@ public class MainActivity extends Activity {
         saveButton.setOnClickListener(v -> {
             saveSettings();
             Toast.makeText(this, "设置已保存", Toast.LENGTH_SHORT).show();
+            checkCurrentState(true);
         });
-        openPageButton.setOnClickListener(v -> {
+        refreshStateButton.setOnClickListener(v -> {
             saveSettings();
-            automationRunning = false;
-            automationStep = 0;
-            statusText.setText("已打开网页模式");
-            detailText.setText("当前为网页管理模式，可手动登录和操作。");
-            webView.getLayoutParams().height = dp(320);
-            webView.requestLayout();
-            webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim()));
+            checkCurrentState(true);
         });
         clearCookieButton.setOnClickListener(v -> {
             CookieManager.getInstance().removeAllCookies(null);
             CookieManager.getInstance().flush();
+            aclEnabled = null;
+            updateActionButtonUnknown("未登录");
             statusText.setText("已清除登录状态");
-            detailText.setText("下次执行时会重新自动登录。");
+            detailText.setText("下次刷新状态或一键切换时，会在会话过期后重新登录。");
         });
 
         boolean hasPassword = prefs.getString(KEY_PASSWORD, "").length() > 0;
         settingsPanel.setVisibility(hasPassword ? View.GONE : View.VISIBLE);
+        if (hasPassword) {
+            handler.postDelayed(() -> checkCurrentState(false), 400);
+        } else {
+            statusText.setText("等待设置");
+            updateActionButtonUnknown("一键切换");
+        }
     }
 
     private TextView makeLabel(String text) {
@@ -297,7 +305,7 @@ public class MainActivity extends Activity {
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.1");
+        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.2");
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -328,8 +336,10 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 CookieManager.getInstance().flush();
                 injectCompactMode();
-                if (automationRunning && automationStep == 0) {
-                    handler.postDelayed(() -> runAutomationScript(url), 900);
+                if (workMode == MODE_CHECK_STATE) {
+                    handler.postDelayed(() -> runPageScript(false), 500);
+                } else if (workMode == MODE_TOGGLE) {
+                    handler.postDelayed(() -> runPageScript(true), 500);
                 }
             }
 
@@ -337,7 +347,7 @@ public class MainActivity extends Activity {
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (request.isForMainFrame()) {
-                    failAutomation("页面打开失败，请检查软路由地址或手机网络。");
+                    failWork("页面打开失败，请检查软路由地址或手机网络。");
                 }
             }
         });
@@ -349,34 +359,58 @@ public class MainActivity extends Activity {
 
     private void startOneClickToggle() {
         saveSettings();
-
-        String address = addressInput.getText().toString().trim();
-        String username = usernameInput.getText().toString().trim();
-        String password = passwordInput.getText().toString();
-
-        if (address.length() == 0) {
-            addressInput.setText(DEFAULT_ADDRESS);
-            address = DEFAULT_ADDRESS;
-        }
-        if (username.length() == 0 || password.length() == 0) {
-            settingsPanel.setVisibility(View.VISIBLE);
-            Toast.makeText(this, "请先填写 LuCI 用户名和密码", Toast.LENGTH_SHORT).show();
+        if (!hasRequiredSettings()) {
             return;
         }
         if (!isNetworkAvailable()) {
             Toast.makeText(this, "当前手机网络不可用", Toast.LENGTH_SHORT).show();
         }
 
-        automationRunning = true;
-        automationStep = 0;
+        workMode = MODE_TOGGLE;
         actionButton.setEnabled(false);
         settingsButton.setEnabled(false);
-        statusText.setText("正在连接软路由...");
-        detailText.setText("会自动登录 LuCI，然后切换访问控制主开关并保存应用。");
+        statusText.setText("正在检测登录状态...");
+        detailText.setText("已有 LuCI 会话会直接操作；会话超时才会自动登录。操作内容：切换主开关并保存应用。");
         webView.getLayoutParams().height = dp(1);
         webView.requestLayout();
+        webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim()));
+    }
 
-        webView.loadUrl(normalizeToAclUrl(address));
+    private void checkCurrentState(boolean userTriggered) {
+        saveSettings();
+        if (!hasRequiredSettings()) {
+            return;
+        }
+        workMode = MODE_CHECK_STATE;
+        actionButton.setEnabled(false);
+        settingsButton.setEnabled(false);
+        statusText.setText("正在检测当前状态...");
+        detailText.setText("如果登录会话仍有效，将直接读取状态；如果会话超时，会自动登录后再读取。");
+        webView.getLayoutParams().height = dp(1);
+        webView.requestLayout();
+        webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim()));
+        if (userTriggered) {
+            Toast.makeText(this, "正在刷新 PassWall 访问控制状态", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private boolean hasRequiredSettings() {
+        String address = addressInput.getText().toString().trim();
+        String username = usernameInput.getText().toString().trim();
+        String password = passwordInput.getText().toString();
+
+        if (address.length() == 0) {
+            addressInput.setText(DEFAULT_ADDRESS);
+        }
+        if (username.length() == 0 || password.length() == 0) {
+            settingsPanel.setVisibility(View.VISIBLE);
+            Toast.makeText(this, "请先填写 LuCI 用户名和密码", Toast.LENGTH_SHORT).show();
+            statusText.setText("等待设置");
+            detailText.setText("填写并保存后，App 会先验证登录状态，再执行一键切换。");
+            updateActionButtonUnknown("一键切换");
+            return false;
+        }
+        return true;
     }
 
     private void saveSettings() {
@@ -387,78 +421,174 @@ public class MainActivity extends Activity {
                 .apply();
     }
 
-    private void runAutomationScript(String currentUrl) {
-        if (!automationRunning || automationStep != 0) {
+    private void runPageScript(boolean doToggle) {
+        if (workMode == MODE_IDLE) {
             return;
         }
 
         String username = usernameInput.getText().toString().trim();
         String password = passwordInput.getText().toString();
 
-        String js = "(function(){" +
-                "try{" +
-                "var USER=" + JSONObject.quote(username) + ";" +
-                "var PASS=" + JSONObject.quote(password) + ";" +
-                "function fire(el,type){try{el.dispatchEvent(new Event(type,{bubbles:true,cancelable:true}));}catch(e){}}" +
-                "function text(el){return ((el.innerText||el.textContent||el.value||'')+'').trim();}" +
-                "function findLoginUser(){" +
-                "return document.querySelector('input[name=\"luci_username\"],input#luci_username,input[name=\"username\"],input[type=\"text\"],input:not([type])');" +
-                "}" +
-                "function findLoginPass(){" +
-                "return document.querySelector('input[name=\"luci_password\"],input#luci_password,input[name=\"password\"],input[type=\"password\"]');" +
-                "}" +
-                "var passEl=findLoginPass();" +
-                "var userEl=findLoginUser();" +
-                "if(passEl && userEl){" +
-                "userEl.focus();userEl.value=USER;fire(userEl,'input');fire(userEl,'change');" +
-                "passEl.focus();passEl.value=PASS;fire(passEl,'input');fire(passEl,'change');" +
-                "var form=passEl.form||userEl.form;" +
-                "var btn=null;" +
-                "if(form){btn=form.querySelector('button[type=\"submit\"],input[type=\"submit\"],button,input.cbi-button');}" +
-                "if(!btn){btn=Array.from(document.querySelectorAll('button,input[type=\"submit\"]')).find(function(e){var t=text(e);return /登录|登陆|Login|Sign in/i.test(t);});}" +
-                "if(btn){btn.click();}else if(form){form.submit();}else{return 'LOGIN_FORM_NO_SUBMIT';}" +
-                "return 'LOGIN_SUBMITTED';" +
-                "}" +
-                "if(location.href.indexOf('/cgi-bin/luci/admin/services/passwall/acl')<0){" +
-                "return 'NOT_ACL:'+location.href;" +
-                "}" +
-                "var candidates=Array.from(document.querySelectorAll('input[type=\"checkbox\"]'));" +
-                "var main=candidates.find(function(cb){" +
-                "var id=(cb.id||'');var name=(cb.name||'');var box=cb.closest('.cbi-value,.cbi-section-node,div');var body=text(box||cb);" +
-                "return name.indexOf('acl_enable')>=0 || id.indexOf('acl_enable')>=0 || body.indexOf('主开关')>=0;" +
-                "});" +
-                "if(!main){return 'ACL_SWITCH_NOT_FOUND';}" +
-                "var before=main.checked?'开启':'关闭';" +
-                "try{main.scrollIntoView({block:'center'});}catch(e){}" +
-                "var label=main.id?document.querySelector('label[for=\"'+main.id+'\"]'):null;" +
-                "if(label){label.click();}else{main.click();}" +
-                "if((before==='开启' && main.checked) || (before==='关闭' && !main.checked)){" +
-                "main.checked=!main.checked;" +
-                "}" +
-                "fire(main,'input');fire(main,'change');fire(main,'click');" +
-                "var after=main.checked?'开启':'关闭';" +
-                "setTimeout(function(){" +
-                "var apply=document.querySelector('.cbi-button-apply,input[name=\"cbi.apply\"],button[name=\"cbi.apply\"],input[value*=\"保存并应用\"],button[value*=\"保存并应用\"]');" +
-                "if(!apply){" +
-                "apply=Array.from(document.querySelectorAll('button,input[type=\"submit\"],input[type=\"button\"],a')).find(function(e){" +
-                "var t=text(e);return t.indexOf('保存并应用')>=0 || /Save\\s*&\\s*Apply/i.test(t) || /Save.*Apply/i.test(t);" +
-                "});" +
-                "}" +
-                "if(apply){apply.click();}" +
-                "},350);" +
-                "return 'TOGGLED:'+before+'->'+after;" +
-                "}catch(e){return 'ERROR:'+e.message;}" +
-                "})()";
+        String js = """
+                (function(){
+                  try{
+                    var USER = __USER__;
+                    var PASS = __PASS__;
+                    var DO_TOGGLE = __DO_TOGGLE__;
+                    function fire(el,type){try{el.dispatchEvent(new Event(type,{bubbles:true,cancelable:true}));}catch(e){}}
+                    function text(el){return ((el && (el.innerText||el.textContent||el.value) || '')+'').trim();}
+                    function findLogin(){
+                      var passEl = document.querySelector('input[name="luci_password"],input#luci_password,input[name="password"],input[type="password"]');
+                      if(!passEl){ return null; }
+                      var root = passEl.form || document;
+                      var userEl = root.querySelector('input[name="luci_username"],input#luci_username,input[name="username"],input[type="text"]');
+                      if(!userEl){ userEl = document.querySelector('input[name="luci_username"],input#luci_username,input[name="username"],input[type="text"]'); }
+                      if(!userEl){ return null; }
+                      return {user:userEl, pass:passEl, form:(passEl.form||userEl.form)};
+                    }
+                    function submitLogin(login){
+                      login.user.focus(); login.user.value = USER; fire(login.user,'input'); fire(login.user,'change');
+                      login.pass.focus(); login.pass.value = PASS; fire(login.pass,'input'); fire(login.pass,'change');
+                      var form = login.form;
+                      var btn = null;
+                      if(form){ btn = form.querySelector('button[type="submit"],input[type="submit"],button,input.cbi-button'); }
+                      if(!btn){
+                        btn = Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"]')).find(function(e){
+                          var t = text(e); return /登录|登陆|Login|Sign in/i.test(t);
+                        });
+                      }
+                      if(btn){ btn.click(); }
+                      else if(form){ form.submit(); }
+                      else { return false; }
+                      return true;
+                    }
+                    function findAclSwitch(){
+                      var candidates = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+                      return candidates.find(function(cb){
+                        var id = cb.id || '';
+                        var name = cb.name || '';
+                        var box = cb.closest('.cbi-value,.cbi-section-node,div');
+                        var body = text(box || cb);
+                        return name.indexOf('acl_enable') >= 0 || id.indexOf('acl_enable') >= 0 || body.indexOf('主开关') >= 0;
+                      });
+                    }
+                    function findApplyButton(){
+                      var apply = document.querySelector('.cbi-button-apply,input[name="cbi.apply"],button[name="cbi.apply"],input[value*="保存并应用"],button[value*="保存并应用"]');
+                      if(apply){ return apply; }
+                      return Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"],a')).find(function(e){
+                        var t = text(e); return t.indexOf('保存并应用') >= 0 || /Save\s*&\s*Apply/i.test(t) || /Save.*Apply/i.test(t);
+                      });
+                    }
 
-        webView.evaluateJavascript(js, result -> handleAutomationResult(result == null ? "" : result));
+                    var login = findLogin();
+                    if(login){
+                      if(submitLogin(login)){ return 'LOGIN_SUBMITTED'; }
+                      return 'LOGIN_FORM_NO_SUBMIT';
+                    }
+
+                    if(location.href.indexOf('/cgi-bin/luci/admin/services/passwall/acl') < 0){
+                      return 'NOT_ACL:' + location.href;
+                    }
+
+                    var main = findAclSwitch();
+                    if(!main){ return 'ACL_SWITCH_NOT_FOUND'; }
+
+                    if(!DO_TOGGLE){
+                      return 'STATE:' + (main.checked ? 'ON' : 'OFF');
+                    }
+
+                    var before = main.checked;
+                    try{ main.scrollIntoView({block:'center'}); }catch(e){}
+                    var label = main.id ? document.querySelector('label[for="' + main.id + '"]') : null;
+                    if(label){ label.click(); } else { main.click(); }
+                    if(before === main.checked){ main.checked = !main.checked; }
+                    fire(main,'input'); fire(main,'change');
+                    var after = main.checked;
+
+                    var apply = findApplyButton();
+                    if(!apply){ return 'APPLY_NOT_FOUND:' + (before ? 'ON' : 'OFF') + '->' + (after ? 'ON' : 'OFF'); }
+                    apply.click();
+                    return 'TOGGLED:' + (before ? 'ON' : 'OFF') + '->' + (after ? 'ON' : 'OFF');
+                  }catch(e){
+                    return 'ERROR:' + e.message;
+                  }
+                })()
+                """;
+
+        js = js.replace("__USER__", JSONObject.quote(username))
+                .replace("__PASS__", JSONObject.quote(password))
+                .replace("__DO_TOGGLE__", doToggle ? "true" : "false");
+
+        webView.evaluateJavascript(js, result -> handlePageScriptResult(result == null ? "" : result));
     }
 
-    private void handleAutomationResult(String rawResult) {
-        if (!automationRunning) {
+    private void handlePageScriptResult(String rawResult) {
+        if (workMode == MODE_IDLE) {
             return;
         }
 
-        String result = rawResult;
+        String result = decodeJsString(rawResult);
+
+        if (result.startsWith("LOGIN_SUBMITTED")) {
+            if (workMode == MODE_TOGGLE) {
+                statusText.setText("登录会话已超时，正在自动登录...");
+                detailText.setText("登录完成后会继续切换主开关并保存应用。");
+            } else {
+                statusText.setText("登录会话已超时，正在自动登录...");
+                detailText.setText("登录完成后会继续读取当前主开关状态。");
+            }
+            return;
+        }
+
+        if (result.startsWith("NOT_ACL:")) {
+            statusText.setText("正在进入 PassWall 访问控制页...");
+            handler.postDelayed(() -> webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim())), 700);
+            return;
+        }
+
+        if (result.startsWith("STATE:")) {
+            boolean enabled = result.contains("ON");
+            aclEnabled = enabled;
+            updateActionButtonState(enabled);
+            finishWork(enabled ? "当前状态：访问控制已开启" : "当前状态：访问控制已关闭");
+            detailText.setText("状态已刷新。点击中间按钮可切换状态并自动保存应用。");
+            return;
+        }
+
+        if (result.startsWith("TOGGLED:")) {
+            boolean enabled = result.endsWith("->ON");
+            aclEnabled = enabled;
+            updateActionButtonState(enabled);
+            finishWork("执行完成");
+            detailText.setText((enabled ? "已切换为：开启" : "已切换为：关闭") + "，已点击保存并应用。建议等待几秒让 PassWall 生效。");
+            return;
+        }
+
+        if (result.startsWith("APPLY_NOT_FOUND:")) {
+            failWork("已经切换主开关，但没有找到“保存并应用”按钮。请点“刷新状态”后确认页面结构。");
+            return;
+        }
+
+        if (result.startsWith("LOGIN_FORM_NO_SUBMIT")) {
+            failWork("已填写登录信息，但没有找到登录按钮。请确认 LuCI 登录页是否正常。");
+            return;
+        }
+
+        if (result.startsWith("ACL_SWITCH_NOT_FOUND")) {
+            failWork("没有找到访问控制主开关。请确认当前 PassWall 访问控制页面可正常打开。");
+            return;
+        }
+
+        if (result.startsWith("ERROR:")) {
+            failWork("自动操作失败：" + result);
+            return;
+        }
+
+        failWork("自动操作失败，返回结果：" + result);
+    }
+
+    private String decodeJsString(String rawResult) {
+        String result = rawResult == null ? "" : rawResult;
         if (result.startsWith("\"") && result.endsWith("\"") && result.length() >= 2) {
             result = result.substring(1, result.length() - 1)
                     .replace("\\\"", "\"")
@@ -467,62 +597,52 @@ public class MainActivity extends Activity {
                     .replace("\\u003E", ">")
                     .replace("\\u0026", "&");
         }
-
-        if (result.startsWith("LOGIN_SUBMITTED")) {
-            statusText.setText("正在自动登录...");
-            detailText.setText("登录成功后会继续切换主开关。");
-            return;
-        }
-
-        if (result.startsWith("NOT_ACL:")) {
-            statusText.setText("登录后重新进入访问控制页...");
-            handler.postDelayed(() -> webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim())), 700);
-            return;
-        }
-
-        if (result.startsWith("TOGGLED:")) {
-            automationStep = 1;
-            statusText.setText("已点击保存并应用");
-            detailText.setText(result.replace("TOGGLED:", "主开关状态：") + "，正在等待配置生效。");
-            handler.postDelayed(() -> finishAutomation("执行完成"), 6500);
-            return;
-        }
-
-        if (result.startsWith("LOGIN_FORM_NO_SUBMIT")) {
-            failAutomation("已填写登录信息，但没有找到登录按钮。请点“打开网页”确认登录页结构。");
-            return;
-        }
-
-        if (result.startsWith("ACL_SWITCH_NOT_FOUND")) {
-            failAutomation("没有找到访问控制主开关。请点“打开网页”确认是否已进入 PassWall 访问控制页面。");
-            return;
-        }
-
-        if (result.startsWith("ERROR:")) {
-            failAutomation("自动操作失败：" + result);
-            return;
-        }
-
-        failAutomation("自动操作失败，返回结果：" + result);
+        return result;
     }
 
-    private void finishAutomation(String message) {
-        automationRunning = false;
-        automationStep = 0;
+    private void finishWork(String message) {
+        workMode = MODE_IDLE;
         actionButton.setEnabled(true);
         settingsButton.setEnabled(true);
         statusText.setText(message);
         CookieManager.getInstance().flush();
     }
 
-    private void failAutomation(String message) {
-        automationRunning = false;
-        automationStep = 0;
+    private void failWork(String message) {
+        workMode = MODE_IDLE;
         actionButton.setEnabled(true);
         settingsButton.setEnabled(true);
         statusText.setText("执行失败");
         detailText.setText(message);
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+        if (aclEnabled == null) {
+            updateActionButtonUnknown("一键切换");
+        } else {
+            updateActionButtonState(aclEnabled);
+        }
+    }
+
+    private void updateActionButtonState(boolean enabled) {
+        if (enabled) {
+            setActionButtonStyle(Color.rgb(23, 166, 92));
+            actionButton.setText("当前：开启\n点击关闭");
+        } else {
+            setActionButtonStyle(Color.rgb(218, 62, 62));
+            actionButton.setText("当前：关闭\n点击开启");
+        }
+    }
+
+    private void updateActionButtonUnknown(String text) {
+        setActionButtonStyle(Color.rgb(107, 119, 140));
+        actionButton.setText(text);
+    }
+
+    private void setActionButtonStyle(int color) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(dp(18));
+        actionButton.setBackground(bg);
+        actionButton.setTextColor(Color.WHITE);
     }
 
     private String normalizeToAclUrl(String raw) {
