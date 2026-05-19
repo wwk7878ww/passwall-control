@@ -44,6 +44,7 @@ public class MainActivity extends Activity {
     private static final int MODE_IDLE = 0;
     private static final int MODE_CHECK_STATE = 1;
     private static final int MODE_TOGGLE = 2;
+    private static final int MAX_PAGE_SCRIPT_RETRY = 8;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -60,6 +61,7 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
 
     private int workMode = MODE_IDLE;
+    private int pageScriptRetryCount = 0;
     private Boolean aclEnabled = null;
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -208,17 +210,25 @@ public class MainActivity extends Activity {
                 dp(48)
         ));
 
-        LinearLayout settingButtons = new LinearLayout(this);
-        settingButtons.setOrientation(LinearLayout.HORIZONTAL);
-        settingButtons.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout settingButtonsRow1 = new LinearLayout(this);
+        settingButtonsRow1.setOrientation(LinearLayout.HORIZONTAL);
+        settingButtonsRow1.setGravity(Gravity.CENTER_VERTICAL);
 
         Button saveButton = makeSmallButton("保存设置");
         Button refreshStateButton = makeSmallButton("刷新状态");
+        settingButtonsRow1.addView(saveButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingButtonsRow1.addView(refreshStateButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingsPanel.addView(settingButtonsRow1);
+
+        LinearLayout settingButtonsRow2 = new LinearLayout(this);
+        settingButtonsRow2.setOrientation(LinearLayout.HORIZONTAL);
+        settingButtonsRow2.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button openPageButton = makeSmallButton("打开网页");
         Button clearCookieButton = makeSmallButton("清除登录");
-        settingButtons.addView(saveButton, new LinearLayout.LayoutParams(0, dp(46), 1));
-        settingButtons.addView(refreshStateButton, new LinearLayout.LayoutParams(0, dp(46), 1));
-        settingButtons.addView(clearCookieButton, new LinearLayout.LayoutParams(0, dp(46), 1));
-        settingsPanel.addView(settingButtons);
+        settingButtonsRow2.addView(openPageButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingButtonsRow2.addView(clearCookieButton, new LinearLayout.LayoutParams(0, dp(46), 1));
+        settingsPanel.addView(settingButtonsRow2);
 
         webView = new WebView(this);
         root.addView(webView, new LinearLayout.LayoutParams(
@@ -240,6 +250,7 @@ public class MainActivity extends Activity {
             saveSettings();
             checkCurrentState(true);
         });
+        openPageButton.setOnClickListener(v -> openDebugWebPage());
         clearCookieButton.setOnClickListener(v -> {
             CookieManager.getInstance().removeAllCookies(null);
             CookieManager.getInstance().flush();
@@ -304,8 +315,8 @@ public class MainActivity extends Activity {
         settings.setSupportZoom(false);
         settings.setJavaScriptCanOpenWindowsAutomatically(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.2");
+        settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        settings.setUserAgentString(settings.getUserAgentString() + " PassWallControl/1.3");
 
         CookieManager cookieManager = CookieManager.getInstance();
         cookieManager.setAcceptCookie(true);
@@ -337,9 +348,9 @@ public class MainActivity extends Activity {
                 CookieManager.getInstance().flush();
                 injectCompactMode();
                 if (workMode == MODE_CHECK_STATE) {
-                    handler.postDelayed(() -> runPageScript(false), 500);
+                    handler.postDelayed(() -> runPageScript(false), 1500);
                 } else if (workMode == MODE_TOGGLE) {
-                    handler.postDelayed(() -> runPageScript(true), 500);
+                    handler.postDelayed(() -> runPageScript(true), 1500);
                 }
             }
 
@@ -357,6 +368,19 @@ public class MainActivity extends Activity {
         settingsPanel.setVisibility(settingsPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
     }
 
+    private void openDebugWebPage() {
+        saveSettings();
+        workMode = MODE_IDLE;
+        pageScriptRetryCount = 0;
+        actionButton.setEnabled(true);
+        settingsButton.setEnabled(true);
+        statusText.setText("已打开网页模式");
+        detailText.setText("可直接查看当前 WebView 到了哪个 LuCI 页面，便于确认登录或页面跳转情况。");
+        webView.getLayoutParams().height = dp(360);
+        webView.requestLayout();
+        webView.loadUrl(addCacheBuster(normalizeToAclUrl(addressInput.getText().toString().trim())));
+    }
+
     private void startOneClickToggle() {
         saveSettings();
         if (!hasRequiredSettings()) {
@@ -366,14 +390,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "当前手机网络不可用", Toast.LENGTH_SHORT).show();
         }
 
-        workMode = MODE_TOGGLE;
-        actionButton.setEnabled(false);
-        settingsButton.setEnabled(false);
-        statusText.setText("正在检测登录状态...");
-        detailText.setText("已有 LuCI 会话会直接操作；会话超时才会自动登录。操作内容：切换主开关并保存应用。");
-        webView.getLayoutParams().height = dp(1);
-        webView.requestLayout();
-        webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim()));
+        beginWork(MODE_TOGGLE, "正在检测登录状态...", "已有 LuCI 会话会直接操作；会话超时才会自动登录。操作内容：切换主开关并保存应用。");
     }
 
     private void checkCurrentState(boolean userTriggered) {
@@ -381,17 +398,22 @@ public class MainActivity extends Activity {
         if (!hasRequiredSettings()) {
             return;
         }
-        workMode = MODE_CHECK_STATE;
-        actionButton.setEnabled(false);
-        settingsButton.setEnabled(false);
-        statusText.setText("正在检测当前状态...");
-        detailText.setText("如果登录会话仍有效，将直接读取状态；如果会话超时，会自动登录后再读取。");
-        webView.getLayoutParams().height = dp(1);
-        webView.requestLayout();
-        webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim()));
+        beginWork(MODE_CHECK_STATE, "正在检测当前状态...", "如果登录会话仍有效，将直接读取状态；如果会话超时，会自动登录后再读取。");
         if (userTriggered) {
             Toast.makeText(this, "正在刷新 PassWall 访问控制状态", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private void beginWork(int mode, String status, String detail) {
+        workMode = mode;
+        pageScriptRetryCount = 0;
+        actionButton.setEnabled(false);
+        settingsButton.setEnabled(false);
+        statusText.setText(status);
+        detailText.setText(detail);
+        webView.getLayoutParams().height = dp(1);
+        webView.requestLayout();
+        webView.loadUrl(addCacheBuster(normalizeToAclUrl(addressInput.getText().toString().trim())));
     }
 
     private boolean hasRequiredSettings() {
@@ -463,20 +485,36 @@ public class MainActivity extends Activity {
                       return true;
                     }
                     function findAclSwitch(){
+                      var exact = document.querySelector('input[type="checkbox"][name*="acl_enable"],input[type="checkbox"][id*="acl_enable"],input[type="checkbox"][data-widget-id*="acl_enable"]');
+                      if(exact){ return exact; }
+                      var label = Array.from(document.querySelectorAll('label')).find(function(l){ return text(l).indexOf('主开关') >= 0; });
+                      if(label){
+                        var forId = label.getAttribute('for');
+                        if(forId){
+                          var byLabel = document.getElementById(forId);
+                          if(byLabel && byLabel.type === 'checkbox'){ return byLabel; }
+                        }
+                        var near = label.closest('.cbi-value,.cbi-section-node,div');
+                        if(near){
+                          var cb = near.querySelector('input[type="checkbox"]');
+                          if(cb){ return cb; }
+                        }
+                      }
                       var candidates = Array.from(document.querySelectorAll('input[type="checkbox"]'));
                       return candidates.find(function(cb){
                         var id = cb.id || '';
                         var name = cb.name || '';
+                        var widget = cb.getAttribute('data-widget-id') || '';
                         var box = cb.closest('.cbi-value,.cbi-section-node,div');
                         var body = text(box || cb);
-                        return name.indexOf('acl_enable') >= 0 || id.indexOf('acl_enable') >= 0 || body.indexOf('主开关') >= 0;
+                        return name.indexOf('acl_enable') >= 0 || id.indexOf('acl_enable') >= 0 || widget.indexOf('acl_enable') >= 0 || body.indexOf('主开关') >= 0;
                       });
                     }
                     function findApplyButton(){
                       var apply = document.querySelector('.cbi-button-apply,input[name="cbi.apply"],button[name="cbi.apply"],input[value*="保存并应用"],button[value*="保存并应用"]');
                       if(apply){ return apply; }
                       return Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"],a')).find(function(e){
-                        var t = text(e); return t.indexOf('保存并应用') >= 0 || /Save\s*&\s*Apply/i.test(t) || /Save.*Apply/i.test(t);
+                        var t = text(e); return t.indexOf('保存并应用') >= 0 || /Save\\s*&\\s*Apply/i.test(t) || /Save.*Apply/i.test(t);
                       });
                     }
 
@@ -541,8 +579,7 @@ public class MainActivity extends Activity {
         }
 
         if (result.startsWith("NOT_ACL:")) {
-            statusText.setText("正在进入 PassWall 访问控制页...");
-            handler.postDelayed(() -> webView.loadUrl(normalizeToAclUrl(addressInput.getText().toString().trim())), 700);
+            retryLoadAclPage("当前还不在 PassWall 访问控制页面，正在重新进入...");
             return;
         }
 
@@ -565,7 +602,7 @@ public class MainActivity extends Activity {
         }
 
         if (result.startsWith("APPLY_NOT_FOUND:")) {
-            failWork("已经切换主开关，但没有找到“保存并应用”按钮。请点“刷新状态”后确认页面结构。");
+            failWork("已经切换主开关，但没有找到“保存并应用”按钮。请点“打开网页”确认页面结构。");
             return;
         }
 
@@ -575,7 +612,7 @@ public class MainActivity extends Activity {
         }
 
         if (result.startsWith("ACL_SWITCH_NOT_FOUND")) {
-            failWork("没有找到访问控制主开关。请确认当前 PassWall 访问控制页面可正常打开。");
+            retryLoadAclPage("当前页面还没有检测到访问控制主开关，正在等待页面加载并重试...");
             return;
         }
 
@@ -584,7 +621,25 @@ public class MainActivity extends Activity {
             return;
         }
 
-        failWork("自动操作失败，返回结果：" + result);
+        retryLoadAclPage("当前页面状态不稳定，正在重新进入访问控制页并重试...");
+    }
+
+    private void retryLoadAclPage(String reason) {
+        if (workMode == MODE_IDLE) {
+            return;
+        }
+        if (pageScriptRetryCount < MAX_PAGE_SCRIPT_RETRY) {
+            pageScriptRetryCount++;
+            statusText.setText("正在等待访问控制页面加载...");
+            detailText.setText(reason + " 第 " + pageScriptRetryCount + "/" + MAX_PAGE_SCRIPT_RETRY + " 次。");
+            handler.postDelayed(() -> {
+                if (workMode != MODE_IDLE) {
+                    webView.loadUrl(addCacheBuster(normalizeToAclUrl(addressInput.getText().toString().trim())));
+                }
+            }, 1200);
+            return;
+        }
+        failWork("多次重试后仍未找到访问控制主开关。请点“设置”里的“打开网页”，确认 LuCI 是否已经进入 PassWall 访问控制页面。");
     }
 
     private String decodeJsString(String rawResult) {
@@ -602,6 +657,7 @@ public class MainActivity extends Activity {
 
     private void finishWork(String message) {
         workMode = MODE_IDLE;
+        pageScriptRetryCount = 0;
         actionButton.setEnabled(true);
         settingsButton.setEnabled(true);
         statusText.setText(message);
@@ -610,6 +666,7 @@ public class MainActivity extends Activity {
 
     private void failWork(String message) {
         workMode = MODE_IDLE;
+        pageScriptRetryCount = 0;
         actionButton.setEnabled(true);
         settingsButton.setEnabled(true);
         statusText.setText("执行失败");
@@ -667,6 +724,11 @@ public class MainActivity extends Activity {
         }
 
         return scheme + "://" + authority + ACL_PATH;
+    }
+
+    private String addCacheBuster(String url) {
+        String separator = url.contains("?") ? "&" : "?";
+        return url + separator + "_pwts=" + System.currentTimeMillis();
     }
 
     private boolean isNetworkAvailable() {
