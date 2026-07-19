@@ -51,7 +51,6 @@ public class MainActivity extends Activity {
     private static final String DEFAULT_ADDRESS = "https://10.1.1.1";
     private static final String DEFAULT_USERNAME = "root";
 
-    // PassWall 基本设置页。总开关和 TCP 节点都在这个页面。
     private static final String MAIN_PATH = "/cgi-bin/luci/admin/services/passwall/settings";
     private static final String ACL_PATH = "/cgi-bin/luci/admin/services/passwall/acl";
 
@@ -344,7 +343,7 @@ public class MainActivity extends Activity {
         s.setSupportZoom(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        s.setUserAgentString(s.getUserAgentString() + " PassWallControl/2.2");
+        s.setUserAgentString(s.getUserAgentString() + " PassWallControl/2.3");
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         webView.setWebChromeClient(new WebChromeClient() {
@@ -398,7 +397,7 @@ public class MainActivity extends Activity {
         saveSettings();
         hideKeyboard();
         if (!checkSettings()) return;
-        begin(TOGGLE_MAIN, MAIN_PATH, "正在切换 PassWall 总开关...", "将进入 PassWall 设置页，操作顶部主开关，并保存应用。", true);
+        begin(TOGGLE_MAIN, MAIN_PATH, "正在切换 PassWall 总开关...", "将进入 PassWall 设置页，操作顶部主开关，并强制保存并应用。", true);
     }
 
     private void startToggleAcl() {
@@ -445,16 +444,24 @@ public class MainActivity extends Activity {
  function text(e){return ((e&&(e.innerText||e.textContent||e.value)||'')+'').trim();}
  function fire(e,t){try{e.dispatchEvent(new Event(t,{bubbles:true,cancelable:true}));}catch(x){}}
  function ret(o){return JSON.stringify(o);}
+ function cleanPath(p){p=(p||'').split('?')[0];while(p.length>1&&p.charAt(p.length-1)==='/')p=p.slice(0,-1);return p;}
  function login(){var p=document.querySelector('input[name="luci_password"],input#luci_password,input[name="password"],input[type="password"]'); if(!p)return null; var r=p.form||document; var u=r.querySelector('input[name="luci_username"],input#luci_username,input[name="username"],input[type="text"]')||document.querySelector('input[name="luci_username"],input#luci_username,input[name="username"],input[type="text"]'); if(!u)return null; return {u:u,p:p,f:(p.form||u.form)};}
- function submit(l){l.u.value=USER;fire(l.u,'input');fire(l.u,'change');l.p.value=PASS;fire(l.p,'input');fire(l.p,'change');var b=l.f?l.f.querySelector('button[type="submit"],input[type="submit"],button,input.cbi-button'):null;if(!b)b=Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"]')).find(function(e){return /登录|登陆|Login|Sign in/i.test(text(e));}); if(b)b.click(); else if(l.f)l.f.submit(); else return false; return true;}
- var l=login(); if(l){return submit(l)?ret({kind:'LOGIN'}):ret({kind:'LOGIN_NO_BUTTON'});}
- var pth=location.pathname.replace(/\/$/,''); var want=TARGET_PATH.replace(/\/$/,''); if(pth!==want)return ret({kind:'NOT_PAGE',url:location.href,want:TARGET_PATH});
- function applyBtn(){var a=document.querySelector('.cbi-button-apply,input[name="cbi.apply"],button[name="cbi.apply"],input[value*="保存并应用"],button[value*="保存并应用"]'); if(a)return a; return Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"],a')).find(function(e){var t=text(e);return t.indexOf('保存并应用')>=0||(t.toLowerCase().indexOf('save')>=0&&t.toLowerCase().indexOf('apply')>=0);});}
+ function submitLogin(l){l.u.value=USER;fire(l.u,'input');fire(l.u,'change');l.p.value=PASS;fire(l.p,'input');fire(l.p,'change');var b=l.f?l.f.querySelector('button[type="submit"],input[type="submit"],button,input.cbi-button'):null;if(!b)b=Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"]')).find(function(e){return /登录|登陆|Login|Sign in/i.test(text(e));}); if(b)b.click(); else if(l.f)l.f.submit(); else return false; return true;}
+ var l=login(); if(l){return submitLogin(l)?ret({kind:'LOGIN'}):ret({kind:'LOGIN_NO_BUTTON'});}
+ if(cleanPath(location.pathname)!==cleanPath(TARGET_PATH))return ret({kind:'NOT_PAGE',url:location.href,want:TARGET_PATH});
+ function applyButton(){var list=Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"],a'));var a=document.querySelector('.cbi-button-apply,input[name="cbi.apply"],button[name="cbi.apply"],input[value*="保存并应用"],button[value*="保存并应用"]');if(a)return a;return list.find(function(e){var t=text(e);var v=(e.value||'')+'';var cls=(e.className||'')+'';return t.indexOf('保存并应用')>=0||v.indexOf('保存并应用')>=0||cls.indexOf('apply')>=0||(t.toLowerCase().indexOf('save')>=0&&t.toLowerCase().indexOf('apply')>=0);});}
+ function ensureHidden(form,name,value){if(!form||!name)return;var old=form.querySelector('input[type="hidden"][name="'+name+'"]');if(old){old.value=value;return;}var h=document.createElement('input');h.type='hidden';h.name=name;h.value=value;form.appendChild(h);}
+ function doApply(changed){var a=applyButton();var form=(a&&a.form)||(changed&&changed.form)||document.querySelector('form');if(a){a.disabled=false;try{a.removeAttribute('disabled');}catch(e){}try{a.scrollIntoView({block:'center'});}catch(e){}}
+   if(form&&a&&a.name){ensureHidden(form,a.name,a.value||'1');}
+   if(form){ensureHidden(form,'cbi.apply','1');}
+   if(a){try{a.click();}catch(e){}}
+   if(form){setTimeout(function(){try{ensureHidden(form,'cbi.apply','1'); if(form.requestSubmit)form.requestSubmit(); else form.submit();}catch(e){}},450);return true;}
+   return !!a;}
  function exactMain(){var row=document.getElementById('cbi-passwall-cfg013fd6-enabled'); if(row){var cb=row.querySelector('input[type="checkbox"][name="cbid.passwall.cfg013fd6.enabled"],input[type="checkbox"][data-widget-id="widget.cbid.passwall.cfg013fd6.enabled"],input[type="checkbox"][name$=".enabled"]'); if(cb)return cb;} var cb=document.querySelector('input[type="checkbox"][name="cbid.passwall.cfg013fd6.enabled"],input[type="checkbox"][data-widget-id="widget.cbid.passwall.cfg013fd6.enabled"]'); if(cb)return cb; var rows=Array.from(document.querySelectorAll('.cbi-value[id^="cbi-passwall-"][id$="-enabled"]')); for(var i=0;i<rows.length;i++){var body=text(rows[i]); if(/Socks|ACL|访问控制/i.test(body))continue; var c=rows[i].querySelector('input[type="checkbox"][name$=".enabled"]'); if(c)return c;} return null;}
  function aclSwitch(){return document.querySelector('input[type="checkbox"][name*="acl_enable"],input[type="checkbox"][id*="acl_enable"],input[type="checkbox"][data-widget-id*="acl_enable"]');}
  function readTcp(){var all=window.lv_dropdown_data||{}, keys=Object.keys(all), cbid=keys.find(function(k){return k.indexOf('.tcp_node')>=0;}), data=cbid?all[cbid]:null, nodes=[]; if(data){(data.ungrouped||[]).forEach(function(n){nodes.push({key:n.key||'',label:n.label||'关闭'});});(data.group_order||Object.keys(data.groups||{})).forEach(function(g){(data.groups&&data.groups[g]||[]).forEach(function(n){nodes.push({key:n.key||'',label:n.label||''});});}); return {cbid:cbid,current_key:data.current_key||'',current_label:data.current_label||'',nodes:nodes};} return {cbid:'',current_key:'',current_label:'',nodes:nodes};}
- function setTcp(){var info=readTcp(), cbid=info.cbid, sel=cbid?document.getElementById(cbid):null; if(!sel)sel=Array.from(document.querySelectorAll('select')).find(function(s){return ((s.name||'')+(s.id||'')).indexOf('tcp_node')>=0;}); if(!sel)return ret({kind:'TCP_NOT_FOUND'}); var opt=Array.from(sel.options).find(function(o){return o.value===TCP_KEY;}); if(!opt){opt=document.createElement('option'); opt.value=TCP_KEY; opt.textContent=TCP_LABEL||TCP_KEY; sel.appendChild(opt);} sel.value=TCP_KEY; Array.from(sel.options).forEach(function(o){o.selected=o.value===TCP_KEY;}); fire(sel,'input'); fire(sel,'change'); var data=(window.lv_dropdown_data||{})[cbid]; if(data){data.current_key=TCP_KEY; data.current_label=TCP_LABEL;} var lab=document.getElementById(cbid+'.label'); if(lab){lab.textContent=TCP_LABEL; lab.title=TCP_LABEL;} var a=applyBtn(); if(!a)return ret({kind:'NO_APPLY'}); a.click(); return ret({kind:'TCP_DONE',key:TCP_KEY,label:TCP_LABEL});}
- function toggle(cb,kind){if(!cb)return ret({kind:'NO_SWITCH',which:kind}); var after=!cb.checked; cb.checked=after; fire(cb,'input'); fire(cb,'change'); var a=applyBtn(); if(!a)return ret({kind:'NO_APPLY',enabled:after}); a.click(); return ret({kind:kind==='main'?'MAIN_DONE':'ACL_DONE',enabled:after});}
+ function setTcp(){var info=readTcp(), cbid=info.cbid, sel=cbid?document.getElementById(cbid):null; if(!sel)sel=Array.from(document.querySelectorAll('select')).find(function(s){return ((s.name||'')+(s.id||'')).indexOf('tcp_node')>=0;}); if(!sel)return ret({kind:'TCP_NOT_FOUND'}); var opt=Array.from(sel.options).find(function(o){return o.value===TCP_KEY;}); if(!opt){opt=document.createElement('option'); opt.value=TCP_KEY; opt.textContent=TCP_LABEL||TCP_KEY; sel.appendChild(opt);} sel.value=TCP_KEY; Array.from(sel.options).forEach(function(o){o.selected=o.value===TCP_KEY;}); fire(sel,'input'); fire(sel,'change'); var data=(window.lv_dropdown_data||{})[cbid]; if(data){data.current_key=TCP_KEY; data.current_label=TCP_LABEL;} var lab=document.getElementById(cbid+'.label');if(lab){lab.textContent=TCP_LABEL;lab.title=TCP_LABEL;} if(!doApply(sel))return ret({kind:'NO_APPLY'}); return ret({kind:'TCP_DONE',key:TCP_KEY,label:TCP_LABEL});}
+ function toggle(cb,kind){if(!cb)return ret({kind:'NO_SWITCH',which:kind}); var before=!!cb.checked; try{cb.scrollIntoView({block:'center'});}catch(e){} try{cb.click();}catch(e){} if(cb.checked===before){cb.checked=!before;} fire(cb,'input');fire(cb,'change');fire(cb,'click'); var after=!!cb.checked; if(!doApply(cb))return ret({kind:'NO_APPLY',enabled:after}); return ret({kind:kind==='main'?'MAIN_DONE':'ACL_DONE',enabled:after});}
  if(ACTION==='READ_MAIN'){var m=exactMain(); if(!m)return ret({kind:'NO_SWITCH',which:'main'}); return ret({kind:'MAIN_STATE',enabled:!!m.checked,tcp:readTcp()});}
  if(ACTION==='READ_ACL'){var ac=aclSwitch(); if(!ac)return ret({kind:'NO_SWITCH',which:'acl'}); return ret({kind:'ACL_STATE',enabled:!!ac.checked});}
  if(ACTION==='TOGGLE_MAIN')return toggle(exactMain(),'main');
@@ -509,14 +516,14 @@ public class MainActivity extends Activity {
                 passwallEnabled = o.optBoolean("enabled");
                 switchStyle(passwallButton, passwallEnabled, "PassWall 总开关");
                 finish("PassWall 总开关已切换");
-                detailText.setText((passwallEnabled ? "已切换为：开启" : "已切换为：关闭") + "，已点击保存并应用。建议等待几秒生效。");
+                detailText.setText((passwallEnabled ? "已切换为：开启" : "已切换为：关闭") + "，已执行保存并应用。建议等待几秒后刷新状态确认。");
                 return;
             }
             if ("ACL_DONE".equals(kind)) {
                 aclEnabled = o.optBoolean("enabled");
                 switchStyle(aclButton, aclEnabled, "访问控制开关");
                 finish("访问控制开关已切换");
-                detailText.setText((aclEnabled ? "已切换为：开启" : "已切换为：关闭") + "，已点击保存并应用。建议等待几秒生效。");
+                detailText.setText((aclEnabled ? "已切换为：开启" : "已切换为：关闭") + "，已执行保存并应用。建议等待几秒后刷新状态确认。");
                 return;
             }
             if ("TCP_DONE".equals(kind)) {
@@ -524,7 +531,7 @@ public class MainActivity extends Activity {
                 currentTcpLabel = o.optString("label");
                 tcpNodeTitle.setText("TCP 节点：" + currentTcpLabel);
                 finish("TCP 节点已切换");
-                detailText.setText("已切换到：" + currentTcpLabel + "，并点击保存并应用。");
+                detailText.setText("已切换到：" + currentTcpLabel + "，并执行保存并应用。");
                 return;
             }
             if ("NO_SWITCH".equals(kind) || "TCP_NOT_FOUND".equals(kind)) {
@@ -532,7 +539,7 @@ public class MainActivity extends Activity {
                 return;
             }
             if ("NO_APPLY".equals(kind)) {
-                fail("已操作控件，但没有找到“保存并应用”按钮。请点“打开网页”确认页面结构。");
+                fail("已操作控件，但没有找到“保存并应用”按钮或表单。请点“打开网页”确认页面结构。");
                 return;
             }
             if ("LOGIN_NO_BUTTON".equals(kind)) {
