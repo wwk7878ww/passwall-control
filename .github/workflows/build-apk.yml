@@ -29,6 +29,18 @@ jobs:
         with:
           gradle-version: 8.10.2
 
+      - name: Patch Java text block escapes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/java/com/wangkai/passwallcontrol/MainActivity.java")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace("location.pathname.replace(/\\/$/,''); var want=TARGET_PATH.replace(/\\/$/,'');",
+                        "location.pathname.replace(/\\\\/$/,''); var want=TARGET_PATH.replace(/\\\\/$/,'');")
+          s = s.replace("replace(/\\s/g,'')", "replace(/\\\\s/g,'')")
+          p.write_text(s, encoding="utf-8")
+          PY
+
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 
