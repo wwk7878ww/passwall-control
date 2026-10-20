@@ -30,6 +30,21 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Restore persistent APK signing key
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+          ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY_BASE64" ] || [ -z "$ANDROID_SIGNING_PASSWORD" ]; then
+            echo "::error::Please configure both ANDROID_SIGNING_KEYSTORE_BASE64 and ANDROID_SIGNING_PASSWORD in repository Settings > Secrets and variables > Actions. See SIGNING_SETUP.md"
+            exit 1
+          fi
+          mkdir -p .android-signing
+          printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > .android-signing/passwall-upload-key.p12
+          chmod 600 .android-signing/passwall-upload-key.p12
+          keytool -list -keystore .android-signing/passwall-upload-key.p12 -storetype PKCS12 -alias passwall-control -storepass "$ANDROID_SIGNING_PASSWORD" >/dev/null
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -47,11 +62,14 @@ jobs:
           p.write_text(s, encoding="utf-8")
           PY
 
-      - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
+      - name: Build signed release APK
+        env:
+          ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        run: gradle assembleRelease --stacktrace
 
-      - name: Upload APK
+      - name: Upload signed release APK
         uses: actions/upload-artifact@v4
         with:
-          name: passwall-control-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: passwall-control-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
