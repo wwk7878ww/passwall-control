@@ -459,8 +459,38 @@ public class MainActivity extends Activity {
    return !!a;}
  function exactMain(){var row=document.getElementById('cbi-passwall-cfg013fd6-enabled'); if(row){var cb=row.querySelector('input[type="checkbox"][name="cbid.passwall.cfg013fd6.enabled"],input[type="checkbox"][data-widget-id="widget.cbid.passwall.cfg013fd6.enabled"],input[type="checkbox"][name$=".enabled"]'); if(cb)return cb;} var cb=document.querySelector('input[type="checkbox"][name="cbid.passwall.cfg013fd6.enabled"],input[type="checkbox"][data-widget-id="widget.cbid.passwall.cfg013fd6.enabled"]'); if(cb)return cb; var rows=Array.from(document.querySelectorAll('.cbi-value[id^="cbi-passwall-"][id$="-enabled"]')); for(var i=0;i<rows.length;i++){var body=text(rows[i]); if(/Socks|ACL|访问控制/i.test(body))continue; var c=rows[i].querySelector('input[type="checkbox"][name$=".enabled"]'); if(c)return c;} return null;}
  function aclSwitch(){return document.querySelector('input[type="checkbox"][name*="acl_enable"],input[type="checkbox"][id*="acl_enable"],input[type="checkbox"][data-widget-id*="acl_enable"]');}
- function readTcp(){var all=window.lv_dropdown_data||{}, keys=Object.keys(all), cbid=keys.find(function(k){return k.indexOf('.tcp_node')>=0;}), data=cbid?all[cbid]:null, nodes=[]; if(data){(data.ungrouped||[]).forEach(function(n){nodes.push({key:n.key||'',label:n.label||'关闭'});});(data.group_order||Object.keys(data.groups||{})).forEach(function(g){(data.groups&&data.groups[g]||[]).forEach(function(n){nodes.push({key:n.key||'',label:n.label||''});});}); return {cbid:cbid,current_key:data.current_key||'',current_label:data.current_label||'',nodes:nodes};} return {cbid:'',current_key:'',current_label:'',nodes:nodes};}
- function setTcp(){var info=readTcp(), cbid=info.cbid, sel=cbid?document.getElementById(cbid):null; if(!sel)sel=Array.from(document.querySelectorAll('select')).find(function(s){return ((s.name||'')+(s.id||'')).indexOf('tcp_node')>=0;}); if(!sel)return ret({kind:'TCP_NOT_FOUND'}); var opt=Array.from(sel.options).find(function(o){return o.value===TCP_KEY;}); if(!opt){opt=document.createElement('option'); opt.value=TCP_KEY; opt.textContent=TCP_LABEL||TCP_KEY; sel.appendChild(opt);} sel.value=TCP_KEY; Array.from(sel.options).forEach(function(o){o.selected=o.value===TCP_KEY;}); fire(sel,'input'); fire(sel,'change'); var data=(window.lv_dropdown_data||{})[cbid]; if(data){data.current_key=TCP_KEY; data.current_label=TCP_LABEL;} var lab=document.getElementById(cbid+'.label');if(lab){lab.textContent=TCP_LABEL;lab.title=TCP_LABEL;} if(!doApply(sel))return ret({kind:'NO_APPLY'}); return ret({kind:'TCP_DONE',key:TCP_KEY,label:TCP_LABEL});}
+ function readTcp(){
+   var all=window.lv_dropdown_data||{}, keys=Object.keys(all);
+   // Support both older PassWall .tcp_node and newer @global[0].node selectors.
+   var cbid=keys.find(function(k){return k.indexOf('passwall')>=0&&k.endsWith('.tcp_node');})
+       ||keys.find(function(k){return k.indexOf('passwall.@global[')>=0&&k.endsWith('.node');})
+       ||keys.find(function(k){return k.indexOf('passwall')>=0&&k.endsWith('.node');});
+   var data=cbid?all[cbid]:null, nodes=[];
+   var selected=document.getElementById(cbid||'')||Array.from(document.querySelectorAll('select')).find(function(s){
+     var id=(s.id||'')+' '+(s.name||'');
+     return id.indexOf('passwall')>=0&&(id.indexOf('.tcp_node')>=0||id.indexOf('.node')>=0);
+   });
+   if(!cbid&&selected)cbid=selected.id||selected.name||'';
+   if(data){
+     (data.ungrouped||[]).forEach(function(n){nodes.push({key:n.key||'',label:n.label||'关闭'});});
+     (data.group_order||Object.keys(data.groups||{})).forEach(function(g){
+       (data.groups&&data.groups[g]||[]).forEach(function(n){nodes.push({key:n.key||'',label:n.label||''});});
+     });
+     return {cbid:cbid,current_key:data.current_key||'',current_label:data.current_label||'',nodes:nodes};
+   }
+   // Fallback for pages that expose a normal select instead of lv_dropdown_data.
+   if(selected){
+     Array.from(selected.options).forEach(function(o){
+       if((o.textContent||'').trim().toLowerCase()==='placeholder')return;
+       nodes.push({key:o.value||'',label:(o.textContent||'').trim()||'关闭'});
+     });
+     var key=selected.value||'', found=nodes.find(function(n){return n.key===key;});
+     var labelEl=document.getElementById(cbid+'.label');
+     return {cbid:cbid,current_key:key,current_label:found?found.label:(labelEl?text(labelEl):''),nodes:nodes};
+   }
+   return {cbid:'',current_key:'',current_label:'',nodes:nodes};
+ }
+ function setTcp(){var info=readTcp(), cbid=info.cbid, sel=cbid?document.getElementById(cbid):null; if(!sel)sel=Array.from(document.querySelectorAll('select')).find(function(s){var n=(s.name||'')+' '+(s.id||'');return n.indexOf('passwall')>=0&&(n.indexOf('.tcp_node')>=0||n.indexOf('.node')>=0);}); if(!sel)return ret({kind:'TCP_NOT_FOUND'}); var opt=Array.from(sel.options).find(function(o){return o.value===TCP_KEY;}); if(!opt){opt=document.createElement('option'); opt.value=TCP_KEY; opt.textContent=TCP_LABEL||TCP_KEY; sel.appendChild(opt);} sel.value=TCP_KEY; Array.from(sel.options).forEach(function(o){o.selected=o.value===TCP_KEY;}); fire(sel,'input'); fire(sel,'change'); var data=(window.lv_dropdown_data||{})[cbid]; if(data){data.current_key=TCP_KEY; data.current_label=TCP_LABEL;} var lab=document.getElementById(cbid+'.label');if(lab){lab.textContent=TCP_LABEL;lab.title=TCP_LABEL;} if(!doApply(sel))return ret({kind:'NO_APPLY'}); return ret({kind:'TCP_DONE',key:TCP_KEY,label:TCP_LABEL});}
  function toggle(cb,kind){if(!cb)return ret({kind:'NO_SWITCH',which:kind}); var before=!!cb.checked; try{cb.scrollIntoView({block:'center'});}catch(e){} try{cb.click();}catch(e){} if(cb.checked===before){cb.checked=!before;} fire(cb,'input');fire(cb,'change');fire(cb,'click'); var after=!!cb.checked; if(!doApply(cb))return ret({kind:'NO_APPLY',enabled:after}); return ret({kind:kind==='main'?'MAIN_DONE':'ACL_DONE',enabled:after});}
  if(ACTION==='READ_MAIN'){var m=exactMain(); if(!m)return ret({kind:'NO_SWITCH',which:'main'}); return ret({kind:'MAIN_STATE',enabled:!!m.checked,tcp:readTcp()});}
  if(ACTION==='READ_ACL'){var ac=aclSwitch(); if(!ac)return ret({kind:'NO_SWITCH',which:'acl'}); return ret({kind:'ACL_STATE',enabled:!!ac.checked});}
