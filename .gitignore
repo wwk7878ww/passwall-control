@@ -1,0 +1,14 @@
+# Never commit Android signing keys or GitHub secret exports
+.android-signing/
+*.jks
+*.keystore
+*.p12
+signing-secrets.txt
+passwall-fixed-signing-backup.zip
+
+# Build outputs
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
