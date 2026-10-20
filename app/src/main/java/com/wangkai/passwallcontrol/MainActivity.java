@@ -7,7 +7,11 @@ import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
+import android.net.RouteInfo;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
@@ -41,11 +45,17 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.util.ArrayList;
 
 public class MainActivity extends Activity {
     private static final String PREFS = "passwall_control_prefs";
-    private static final String KEY_ADDRESS = "router_address";
+    private static final String KEY_ADDRESS = "router_address"; // Legacy single-address setting
+    private static final String KEY_LAN_ADDRESS = "router_lan_address";
+    private static final String KEY_WAN_ADDRESS = "router_wan_address";
+    private static final String KEY_ACCESS_MODE = "router_access_mode";
     private static final String KEY_USERNAME = "router_username";
     private static final String KEY_PASSWORD = "router_password";
     private static final String DEFAULT_ADDRESS = "https://10.1.1.1";
@@ -68,7 +78,10 @@ public class MainActivity extends Activity {
     private ScrollView scrollView;
     private LinearLayout settingsPanel;
     private WebView webView;
-    private EditText addressInput;
+    private EditText lanAddressInput;
+    private EditText wanAddressInput;
+    private Spinner accessModeSpinner;
+    private TextView connectionText;
     private EditText usernameInput;
     private EditText passwordInput;
     private TextView statusText;
@@ -94,6 +107,15 @@ public class MainActivity extends Activity {
     private String currentTcpLabel = "";
     private String targetTcpKey = "";
     private String targetTcpLabel = "";
+    private String activeBaseAddress = "";
+    private boolean activeOnLan = false;
+    private boolean lanFallbackUsed = false;
+    private boolean resolvingAddress = false;
+    private int addressRequestId = 0;
+
+    private interface AddressCallback {
+        void onChosen(String base, boolean isLan);
+    }
 
     private static class NodeItem {
         final String key;
@@ -135,41 +157,98 @@ public class MainActivity extends Activity {
         LinearLayout main = new LinearLayout(this);
         main.setOrientation(LinearLayout.VERTICAL);
         main.setGravity(Gravity.CENTER_HORIZONTAL);
-        main.setPadding(dp(22), dp(18), dp(22), dp(12));
+        // Keep controls comfortably below the status bar on tall phones.
+        main.setPadding(dp(20), dp(48), dp(20), dp(24));
         scrollView.addView(main, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(dp(22), dp(22), dp(22), dp(20));
+        GradientDrawable headerBackground = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{Color.rgb(29, 60, 111), Color.rgb(47, 117, 205)});
+        headerBackground.setCornerRadius(dp(24));
+        header.setBackground(headerBackground);
+        LinearLayout.LayoutParams headerLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        headerLp.setMargins(0, 0, 0, dp(14));
+        main.addView(header, headerLp);
+
         TextView title = new TextView(this);
-        title.setText("passwall控制");
-        title.setTextSize(24);
-        title.setTextColor(Color.rgb(27, 43, 68));
-        title.setGravity(Gravity.CENTER);
-        main.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        title.setText("PassWall 控制台");
+        title.setTextSize(27);
+        title.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        title.setTextColor(Color.WHITE);
+        title.setGravity(Gravity.START);
+        header.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView sub = new TextView(this);
-        sub.setText("总开关、访问控制、TCP节点切换");
-        sub.setTextSize(14);
-        sub.setTextColor(Color.rgb(104, 116, 135));
-        sub.setGravity(Gravity.CENTER);
-        sub.setPadding(0, dp(8), 0, dp(16));
-        main.addView(sub, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        sub.setText("家庭内网优先 · FRP 远程自动切换");
+        sub.setTextSize(13);
+        sub.setTextColor(Color.rgb(215, 233, 255));
+        sub.setGravity(Gravity.START);
+        sub.setPadding(0, dp(8), 0, 0);
+        header.addView(sub, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        connectionText = new TextView(this);
+        connectionText.setText("连接方式：等待检测");
+        connectionText.setTextSize(14);
+        connectionText.setTextColor(Color.rgb(55, 75, 105));
+        connectionText.setPadding(dp(16), dp(14), dp(16), dp(14));
+        GradientDrawable connectionBg = new GradientDrawable();
+        connectionBg.setColor(Color.rgb(231, 238, 250));
+        connectionBg.setCornerRadius(dp(15));
+        connectionText.setBackground(connectionBg);
+        LinearLayout.LayoutParams connectionLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        connectionLp.setMargins(0, 0, 0, dp(16));
+        main.addView(connectionText, connectionLp);
 
         settingsPanel = new LinearLayout(this);
         settingsPanel.setOrientation(LinearLayout.VERTICAL);
         settingsPanel.setPadding(dp(12), dp(12), dp(12), dp(12));
-        settingsPanel.setBackgroundColor(Color.WHITE);
+        GradientDrawable settingsBg = new GradientDrawable();
+        settingsBg.setColor(Color.WHITE);
+        settingsBg.setCornerRadius(dp(20));
+        settingsBg.setStroke(dp(1), Color.rgb(226, 234, 245));
+        settingsPanel.setBackground(settingsBg);
+        settingsPanel.setElevation(dp(2));
         LinearLayout.LayoutParams settingsLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         settingsLp.setMargins(0, 0, 0, dp(14));
         main.addView(settingsPanel, settingsLp);
 
-        addressInput = makeInput("软路由地址，例如 https://10.1.1.1", false);
-        addressInput.setText(prefs.getString(KEY_ADDRESS, DEFAULT_ADDRESS));
+        String legacyAddress = prefs.getString(KEY_ADDRESS, DEFAULT_ADDRESS);
+        String legacyHost = Uri.parse(legacyAddress.contains("://") ? legacyAddress : "https://" + legacyAddress).getHost();
+        boolean legacyPrivate = legacyHost != null
+                && (legacyHost.startsWith("10.") || legacyHost.startsWith("192.168.") || legacyHost.startsWith("172.16.")
+                || legacyHost.startsWith("172.17.") || legacyHost.startsWith("172.18.") || legacyHost.startsWith("172.19.")
+                || legacyHost.startsWith("172.2") || legacyHost.startsWith("172.30.") || legacyHost.startsWith("172.31."));
+        lanAddressInput = makeInput("https://10.1.1.1", false);
+        lanAddressInput.setText(prefs.getString(KEY_LAN_ADDRESS, legacyPrivate ? legacyAddress : DEFAULT_ADDRESS));
+        wanAddressInput = makeInput("例如 http://199.x.x.x:50080", false);
+        wanAddressInput.setText(prefs.getString(KEY_WAN_ADDRESS, legacyPrivate ? "" : legacyAddress));
+        accessModeSpinner = new Spinner(this);
+        String[] modeLabels = {"自动选择（优先家庭内网）", "仅使用内网地址", "仅使用 FRP 公网地址"};
+        ArrayAdapter<String> modeAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, modeLabels);
+        modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        accessModeSpinner.setAdapter(modeAdapter);
+        int modeIndex = prefs.getInt(KEY_ACCESS_MODE, 0);
+        accessModeSpinner.setSelection(Math.max(0, Math.min(2, modeIndex)), false);
+
         usernameInput = makeInput("LuCI 用户名，例如 root", false);
         usernameInput.setText(prefs.getString(KEY_USERNAME, DEFAULT_USERNAME));
         passwordInput = makeInput("LuCI 密码，仅保存在本机", true);
         passwordInput.setText(prefs.getString(KEY_PASSWORD, ""));
 
-        settingsPanel.addView(label("软路由地址"));
-        settingsPanel.addView(addressInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        settingsPanel.addView(label("家庭内网地址"));
+        settingsPanel.addView(lanAddressInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        settingsPanel.addView(label("FRP 公网地址（需包含 http:// 或 https:// 及端口）"));
+        settingsPanel.addView(wanAddressInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        settingsPanel.addView(label("连接方式"));
+        settingsPanel.addView(accessModeSpinner, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52)));
         settingsPanel.addView(label("用户名"));
         settingsPanel.addView(usernameInput, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
         settingsPanel.addView(label("密码"));
@@ -215,10 +294,11 @@ public class MainActivity extends Activity {
         tcpAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, tcpNodes);
         tcpAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         tcpSpinner.setAdapter(tcpAdapter);
-        main.addView(tcpSpinner, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+        tcpSpinner.setPadding(dp(12), 0, dp(12), 0);
+        main.addView(tcpSpinner, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)));
 
         statusText = new TextView(this);
-        statusText.setText("正在初始化");
+        statusText.setText("准备连接软路由");
         statusText.setTextSize(16);
         statusText.setTextColor(Color.rgb(40, 55, 80));
         statusText.setGravity(Gravity.CENTER);
@@ -299,6 +379,12 @@ public class MainActivity extends Activity {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextSize(13);
+        b.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        b.setTextColor(Color.rgb(39, 87, 151));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.rgb(229, 238, 251));
+        bg.setCornerRadius(dp(14));
+        b.setBackground(bg);
         return b;
     }
 
@@ -322,6 +408,7 @@ public class MainActivity extends Activity {
         e.setTextSize(14);
         e.setHint(hint);
         e.setSelectAllOnFocus(false);
+        e.setPadding(dp(12), 0, dp(12), 0);
         e.setOnFocusChangeListener((v, hasFocus) -> {
             if (hasFocus && scrollView != null) {
                 handler.postDelayed(() -> scrollView.smoothScrollTo(0, 0), 150);
@@ -365,7 +452,7 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 CookieManager.getInstance().flush();
                 injectCompactMode();
-                if (mode != IDLE) {
+                if (mode != IDLE && !resolvingAddress) {
                     handler.postDelayed(MainActivity.this::runScript, 1500);
                 }
             }
@@ -374,7 +461,22 @@ public class MainActivity extends Activity {
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 super.onReceivedError(view, request, error);
                 if (request.isForMainFrame()) {
-                    fail("页面打开失败，请检查软路由地址或手机网络。");
+                    if (mode != IDLE && activeOnLan && !lanFallbackUsed
+                            && accessModeSpinner.getSelectedItemPosition() == 0
+                            && !wanAddressInput.getText().toString().trim().isEmpty()) {
+                        // A reachable TCP port is not sufficient proof that LuCI loaded.
+                        // Fall back to FRP once when the internal page actually fails.
+                        lanFallbackUsed = true;
+                        activeOnLan = false;
+                        activeBaseAddress = wanAddressInput.getText().toString().trim();
+                        showConnection("FRP 公网 · 内网页面打开失败，已切换", false);
+                        String path = (mode == READ_ACL || mode == TOGGLE_ACL) ? ACL_PATH : MAIN_PATH;
+                        view.loadUrl(cache(urlFor(activeBaseAddress, path)));
+                    } else if (mode != IDLE) {
+                        fail("页面打开失败，请检查当前网络、FRP 地址及端口。");
+                    } else if (debugVisible) {
+                        statusText.setText("网页打开失败，请检查连接地址");
+                    }
                 }
             }
 
@@ -431,7 +533,22 @@ public class MainActivity extends Activity {
             webView.getLayoutParams().height = dp(1);
             webView.requestLayout();
         }
-        webView.loadUrl(cache(urlFor(addressInput.getText().toString().trim(), path)));
+        final int request = ++addressRequestId;
+        resolvingAddress = true;
+        showConnection("正在识别家庭网络…", false);
+        resolveAddress((base, isLan) -> {
+            if (request != addressRequestId || mode != nextMode) return;
+            resolvingAddress = false;
+            if (base == null || base.trim().isEmpty()) {
+                fail("未找到可用连接地址，请在设置中填写 FRP 公网地址，或切换为仅内网模式。");
+                return;
+            }
+            activeBaseAddress = base;
+            activeOnLan = isLan;
+            lanFallbackUsed = false;
+            showConnection((isLan ? "家庭内网 · " : "FRP 公网 · ") + shortAddress(base), isLan);
+            webView.loadUrl(cache(urlFor(base, path)));
+        });
     }
 
     private void runScript() {
@@ -590,8 +707,8 @@ public class MainActivity extends Activity {
             detailText.setText(reason + " 第 " + retry + "/" + MAX_RETRY + " 次。");
             String path = (mode == READ_ACL || mode == TOGGLE_ACL) ? ACL_PATH : MAIN_PATH;
             handler.postDelayed(() -> {
-                if (mode != IDLE) {
-                    webView.loadUrl(cache(urlFor(addressInput.getText().toString().trim(), path)));
+                if (mode != IDLE && !resolvingAddress) {
+                    webView.loadUrl(cache(urlFor(activeBaseAddress, path)));
                 }
             }, 1200);
             return;
@@ -679,8 +796,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean checkSettings() {
-        if (addressInput.getText().toString().trim().length() == 0) {
-            addressInput.setText(DEFAULT_ADDRESS);
+        if (lanAddressInput.getText().toString().trim().isEmpty()) {
+            lanAddressInput.setText(DEFAULT_ADDRESS);
+        }
+        if (accessModeSpinner.getSelectedItemPosition() == 2 && wanAddressInput.getText().toString().trim().isEmpty()) {
+            settingsPanel.setVisibility(View.VISIBLE);
+            settingsButton.setText("关闭设置");
+            Toast.makeText(this, "请先填写 FRP 公网地址", Toast.LENGTH_SHORT).show();
+            return false;
         }
         if (usernameInput.getText().toString().trim().length() == 0 || passwordInput.getText().toString().length() == 0) {
             settingsPanel.setVisibility(View.VISIBLE);
@@ -698,7 +821,9 @@ public class MainActivity extends Activity {
 
     private void saveSettings() {
         prefs.edit()
-                .putString(KEY_ADDRESS, addressInput.getText().toString().trim())
+                .putString(KEY_LAN_ADDRESS, lanAddressInput.getText().toString().trim())
+                .putString(KEY_WAN_ADDRESS, wanAddressInput.getText().toString().trim())
+                .putInt(KEY_ACCESS_MODE, accessModeSpinner.getSelectedItemPosition())
                 .putString(KEY_USERNAME, usernameInput.getText().toString().trim())
                 .putString(KEY_PASSWORD, passwordInput.getText().toString())
                 .apply();
@@ -746,10 +871,25 @@ public class MainActivity extends Activity {
         detailText.setText("显示 PassWall 设置页，用于排错。再次点击“关闭网页”可收起页面。");
         webView.getLayoutParams().height = dp(360);
         webView.requestLayout();
-        webView.loadUrl(cache(urlFor(addressInput.getText().toString().trim(), MAIN_PATH)));
+        final int request = ++addressRequestId;
+        resolvingAddress = true;
+        resolveAddress((base, isLan) -> {
+            if (request != addressRequestId || !debugVisible) return;
+            resolvingAddress = false;
+            if (base == null || base.trim().isEmpty()) {
+                statusText.setText("请先设置 FRP 地址或切换仅内网模式");
+                return;
+            }
+            activeBaseAddress = base;
+            activeOnLan = isLan;
+            showConnection((isLan ? "家庭内网 · " : "FRP 公网 · ") + shortAddress(base), isLan);
+            webView.loadUrl(cache(urlFor(base, MAIN_PATH)));
+        });
     }
 
     private void closeDebugPage() {
+        ++addressRequestId;
+        resolvingAddress = false;
         debugVisible = false;
         if (openPageButton != null) openPageButton.setText("打开网页");
         if (webView != null) {
@@ -759,6 +899,79 @@ public class MainActivity extends Activity {
         }
         statusText.setText("已关闭网页模式");
         detailText.setText("页面已收起。需要排错时可再次点击“打开网页”。");
+    }
+
+    private void showConnection(String message, boolean local) {
+        if (connectionText == null) return;
+        connectionText.setText("连接方式：" + message);
+        connectionText.setTextColor(local ? Color.rgb(20, 112, 81) : Color.rgb(51, 79, 125));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(local ? Color.rgb(225, 246, 234) : Color.rgb(231, 238, 250));
+        bg.setCornerRadius(dp(15));
+        connectionText.setBackground(bg);
+    }
+
+    private String shortAddress(String address) {
+        Uri parsed = Uri.parse(urlFor(address, ""));
+        return parsed.getAuthority() == null ? address : parsed.getAuthority();
+    }
+
+    private void resolveAddress(AddressCallback callback) {
+        final String local = lanAddressInput.getText().toString().trim();
+        final String remote = wanAddressInput.getText().toString().trim();
+        int accessMode = accessModeSpinner.getSelectedItemPosition();
+        if (accessMode == 1) {
+            callback.onChosen(local, true);
+            return;
+        }
+        if (accessMode == 2) {
+            callback.onChosen(remote, false);
+            return;
+        }
+        // Probe the configured home router only on Wi-Fi networks whose gateway
+        // matches the router. Bind the socket to that Wi-Fi, not a cellular/VPN route.
+        new Thread(() -> {
+            final boolean localAvailable = canReachHomeRouter(local);
+            runOnUiThread(() -> callback.onChosen(localAvailable ? local : remote, localAvailable));
+        }, "PassWall-Route-Detector").start();
+    }
+
+    private boolean canReachHomeRouter(String base) {
+        try {
+            String normalized = base.contains("://") ? base : "https://" + base;
+            Uri uri = Uri.parse(normalized);
+            String host = uri.getHost();
+            if (host == null || host.isEmpty()) return false;
+            int port = uri.getPort();
+            if (port < 1) port = "http".equalsIgnoreCase(uri.getScheme()) ? 80 : 443;
+
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            for (Network network : cm.getAllNetworks()) {
+                NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+                if (capabilities == null || !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                LinkProperties links = cm.getLinkProperties(network);
+                if (links == null) continue;
+                boolean sameGateway = false;
+                for (RouteInfo route : links.getRoutes()) {
+                    InetAddress gateway = route.getGateway();
+                    if (gateway != null && host.equals(gateway.getHostAddress())) {
+                        sameGateway = true;
+                        break;
+                    }
+                }
+                if (!sameGateway) continue;
+                try (Socket socket = network.getSocketFactory().createSocket()) {
+                    socket.connect(new InetSocketAddress(host, port), 1000);
+                    return true;
+                } catch (Exception ignored) {
+                    // Continue to other Wi-Fi networks or use the configured FRP address.
+                }
+            }
+        } catch (Exception ignored) {
+            // Network changes, invalid addresses and timeouts use the external fallback.
+        }
+        return false;
     }
 
     private String urlFor(String raw, String path) {
